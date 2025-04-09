@@ -1,137 +1,93 @@
---составляем запрос для вывода таблицы с колличеством операций и суммой продаж по каждому продавцу
--- первый cte (common table expression) - amount_tab
--- создаю временную таблицу для подсчета суммы продаж по каждому товару и продавцу
-with amount_tab as (
-    select
-        p.name,                          -- название товара из таблицы products
-        s.sales_person_id,               -- id продавца из таблицы sales
-        sum(p.price * s.quantity) as sum_amount, -- сумма продаж: цена товара × количество проданных единиц
-        sum(s.quantity) as operations    -- общее количество проданных единиц (операций/сделок)
-    from products p
-    join sales s                         -- объединяю таблицы товаров и продаж
-        on p.product_id = s.product_id   -- по полю product_id (идентификатор товара)
-    group by p.product_id, s.sales_person_id -- группирую по товару и продавцу
-    order by sum_amount desc, p.name     -- сортирую по убыванию суммы продаж, затем по имени товара
-),
--- второй cte - name_salers
--- создаю таблицу с информацией о продавцах и их продажах
-name_salers as (
-    select
-        -- объединяю имя и фамилию продавца в одно поле
-        e.first_name || ' ' || e.last_name as seller,
-        operations,                       -- количество операций из предыдущего cte
-        sum(at.sum_amount) as income      -- суммарный доход продавца по всем товарам
-    from employees e
-    join amount_tab at                    -- соединяю с предыдущей временной таблицей
-        on e.employee_id = at.sales_person_id -- по id продавца
-    group by seller, operations           -- группирую по продавцу и количеству операций
-    order by income desc                  -- сортирую по доходу (по убыванию)
-)
--- основной запрос
--- выбираю топ-10 продавцов по доходу
-select
-    seller,                               -- имя продавца
-    sum(operations) as operations,        -- общее количество операций (суммирую возможные дубли)
-    round(sum(income), 0) as income       -- общий доход продавца, округляю до целого
-from name_salers
-group by seller                           -- группирую только по продавцу (агрегирую данные)
-order by income desc                      -- сортирую по убыванию дохода
-limit 10;                                 -- ограничиваю вывод 10 записями (топ-10 продавцов)
-
-
---составляем запрос для вывода таблицы со средней выручкой продавца за сделку с округлением до целого
--- первый cte (common table expression) - amount_tab
--- вычисляет сумму продаж и количество операций для каждой пары "товар-продавец"
-with amount_tab as (
-    select
-        p.name,                          -- название товара
-        s.sales_person_id,               -- id продавца
-        sum(p.price * s.quantity) as sum_amount,  -- общая сумма продаж (цена × количество)
-        sum(s.quantity) as operations    -- общее количество проданных единиц
-    from products p
-    join sales s 
-        on p.product_id = s.product_id    -- соединяем таблицы товаров и продаж
-    group by p.product_id, s.sales_person_id  -- группируем по товару и продавцу
-    order by sum_amount desc, p.name      -- сортируем по сумме продаж и названию товара
-),
--- второй cte - name_salers
--- объединяет данные о продажах с информацией о продавцах
-name_salers as (
-    select
+-- 1) запрос для вывода топ-10 продавцов по доходу
+with seller_stats as (
+    -- собираем базовую статистику по продавцам
+    select 
+        e.employee_id,  -- id продавца
         e.first_name || ' ' || e.last_name as seller,  -- полное имя продавца
-        operations,                         -- количество операций из предыдущего cte
-        sum(at.sum_amount) as income        -- суммарный доход продавца по всем товарам
+        count(s.sales_id) as operations,  -- количество сделок
+        sum(p.price * s.quantity) as income  -- общий доход
     from employees e
-    join amount_tab at
-        on e.employee_id = at.sales_person_id  -- соединяем с предыдущим cte по id продавца
-    group by seller, operations              -- группируем по продавцу и количеству операций
-    order by income desc                     -- сортируем по доходу (по убыванию)
-),
--- третий cte - avg_amount
--- вычисляет общее количество операций и суммарный доход для каждого продавца
-avg_amount as (
-    select
-        seller,                             -- имя продавца
-        sum(operations) as operations,      -- общее количество операций продавца
-        sum(income) as income               -- общий доход продавца
-    from name_salers
-    group by seller                         -- группируем только по продавцу
-    order by income desc                    -- сортируем по доходу (по убыванию)
-),
--- четвертый cte - avg_income_all
--- вычисляет средний доход на одну операцию по всем продавцам
-avg_income_all as (
-    select avg(income / operations) as avg_income
-    from avg_amount
+    left join sales s on e.employee_id = s.sales_person_id  -- присоединяем продажи
+    left join products p on s.product_id = p.product_id  -- присоединяем информацию о товарах
+    group by e.employee_id, e.first_name, e.last_name  -- группируем по продавцам
 )
--- основной запрос
--- выбирает продавцов, чей средний доход на операцию ниже общего среднего
-select
-    a.seller,                               -- имя продавца
-    round(sum(a.income / a.operations), 0) as average_income  -- средний доход на операцию (округленный)
-from avg_amount a
-cross join avg_income_all ai                -- присоединяем общее среднее значение ко всем строкам
-group by a.seller, ai.avg_income    -- группируем по продавцу и общему среднему
-having sum(a.income / a.operations) < ai.avg_income  -- фильтруем только тех, кто ниже среднего
-order by average_income;                    -- сортируем по среднему доходу (по возрастанию)
+select 
+    seller,  -- имя продавца
+    operations,  -- количество сделок
+    round(coalesce(income, 0), 0) as income  -- доход (с заменой null на 0 и округлением)
+from seller_stats
+order by 
+    case when income = 0 or income is null then 1 else 0 end,  -- сначала продавцы с доходом
+    income desc  -- сортировка по доходу (убывание)
+limit 10;  -- ограничиваем вывод 10 записями 
 
+-- 2) Выводит продавцов со средним доходом выше среднего по компании
+-- Формируем временную таблицу с базовой статистикой по продавцам
+with seller_stats as (
+    select 
+        e.employee_id,  -- ID продавца
+        e.first_name || ' ' || e.last_name as seller,  -- Полное имя продавца
+        count(s.sales_id) as operations,  -- Количество совершенных сделок
+        sum(p.price * s.quantity) as income  -- Общий доход от продаж
+    from employees e
+    -- Присоединяем таблицу продаж (LEFT JOIN чтобы включить всех продавцов)
+    left join sales s on e.employee_id = s.sales_person_id
+    -- Присоединяем таблицу товаров для получения цен
+    left join products p on s.product_id = p.product_id
+    group by e.employee_id, e.first_name, e.last_name
+    -- Исключаем продавцов без продаж (с нулевым доходом)
+    having sum(p.price * s.quantity) > 0  
+),
+-- Вычисляем средний доход на сделку по всем продавцам
+avg_income_all as (
+    select avg(income / nullif(operations, 0)) as avg_income
+    from seller_stats
+    -- NULLIF защищает от деления на ноль (хотя HAVING уже исключил нулевые доходы)
+)
+-- Итоговый результат: продавцы с доходом выше среднего
+select 
+    seller,  -- Имя продавца
+    round(income / nullif(operations, 0), 0) as average_income  -- Средний доход на сделку (округленный)
+from seller_stats ss
+-- Соединяем с таблицей средних значений (CROSS JOIN для сравнения каждого продавца со средним)
+cross join avg_income_all a
+-- Фильтр: оставляем только продавцов с доходом выше среднего
+where income / nullif(operations, 0) > a.avg_income  
+-- Сортировка по общему доходу (от наибольшего к наименьшему)
+order by income desc;  
 
---Третий отчет содержит информацию о выручке по дням недели. Каждая запись содержит имя и 
---фамилию продавца, день недели и суммарную выручку
--- первый cte (common table expression) - amount_tab
--- создаю временную таблицу для подсчета суммы продаж по каждому товару и продавцу
+-- 3) Анализ продаж по дням недели с правильной сортировкой (пн-вс)
+-- Первый CTE: анализируем продажи по товарам и продавцам
 with amount_tab as (
     select
-        p.name,                          -- название товара из таблицы products
-        s.sales_person_id,               -- id продавца из таблицы sales
-        sum(p.price * s.quantity) as sum_amount, -- сумма продаж: цена товара × количество проданных единиц
-        sum(s.quantity) as operations    -- общее количество проданных единиц (операций/сделок)
+        p.name,                          -- Название товара
+        s.sales_person_id,               -- ID продавца
+        sum(p.price * s.quantity) as sum_amount, -- Сумма продаж (цена × количество)
+        sum(s.quantity) as operations    -- Количество проданных единиц
     from products p
-    join sales s                         -- объединяю таблицы товаров и продаж
-        on p.product_id = s.product_id   -- по полю product_id (идентификатор товара)
-    group by p.product_id, s.sales_person_id -- группирую по товару и продавцу
-    order by sum_amount desc, p.name     -- сортирую по убыванию суммы продаж, затем по имени товара
+    join sales s                         -- Соединяем таблицы товаров и продаж
+        on p.product_id = s.product_id   -- По ID товара
+    group by p.product_id, s.sales_person_id -- Группируем по товару и продавцу
+    order by sum_amount desc, p.name     -- Сортировка по сумме продаж и названию товара
 ),
--- второй cte - name_salers
--- создаю таблицу с информацией о продавцах и их продажах
+-- Второй CTE: агрегируем данные по продавцам
 name_salers as (
     select
-        -- объединяю имя и фамилию продавца в одно поле
         e.employee_id,
-        e.first_name || ' ' || e.last_name as seller,
-        operations,                       -- количество операций из предыдущего cte
-        sum(at.sum_amount) as income      -- суммарный доход продавца по всем товарам
+        e.first_name || ' ' || e.last_name as seller, -- Полное имя продавца
+        operations,                       -- Количество операций из предыдущего CTE
+        sum(at.sum_amount) as income      -- Суммарный доход продавца
     from employees e
-    join amount_tab at                    -- соединяю с предыдущей временной таблицей
-        on e.employee_id = at.sales_person_id -- по id продавца
-    group by seller, operations, e.employee_id -- группирую по продавцу, количеству операций и id
-    order by income desc                  -- сортирую по доходу (по убыванию)
+    join amount_tab at                    -- Соединяем с предыдущим CTE
+        on e.employee_id = at.sales_person_id -- По ID продавца
+    group by seller, operations, e.employee_id -- Группируем по продавцу и операциям
+    order by income desc                  -- Сортировка по доходу (убывание)
 ),
--- основной запрос
--- анализирую продажи по дням недели с правильной сортировкой (пн-вс)
+-- Третий CTE: анализируем продажи по дням недели
 day_sale as (
     select
         ns.seller,
+        -- Преобразуем номер дня недели в название
         case extract(dow from s.sale_date)
             when 0 then 'воскресенье'
             when 1 then 'понедельник'
@@ -141,21 +97,22 @@ day_sale as (
             when 5 then 'пятница'
             when 6 then 'суббота'
         end as day_of_week,
-        -- Преобразуем нумерацию дней для сортировки (пн=1, вт=2,..., вс=7)
+        -- Создаем поле для сортировки (пн=1, вт=2,..., вс=7)
         case when extract(dow from s.sale_date) = 0 then 7 
              else extract(dow from s.sale_date) 
         end as day_sort_order,
-        round(sum(ns.income), 0) as income
+        round(sum(ns.income), 0) as income  -- Доход с округлением
     from name_salers ns
     join sales s
         on ns.employee_id = s.sales_person_id
     group by ns.seller, day_of_week, day_sort_order
 )
+-- Итоговый запрос: суммарные продажи по дням недели
 select
-    seller,
-    day_of_week,
-    income
+    day_sort_order,      -- Порядковый номер дня для сортировки
+    day_of_week,         -- Название дня недели
+    sum(income) as income  -- Суммарный доход по дню
 from day_sale
+group by day_of_week, day_sort_order  -- Группируем по дням недели
 order by 
-    day_sort_order, seller, income desc  -- Сортировка от понедельника (1) до воскресенья (7)
-   
+    day_sort_order   -- Сортировка от понедельника (1) до воскресенья (7)
